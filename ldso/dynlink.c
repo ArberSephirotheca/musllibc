@@ -1001,6 +1001,7 @@ static int fixup_rpath_sql(struct dso *p, char *buf, size_t buf_size) {
 		s = (const char*)sqlite3_column_text(stmt, 0);
 	}
 	strcpy(d, s);
+	sqlite3_finalize(stmt);
 	return 0;
 }
 
