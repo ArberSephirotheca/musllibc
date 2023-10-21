@@ -914,7 +914,93 @@ static int path_open(const char *name, const char *s, char *buf, size_t buf_size
 	}
 }
 
-static int fixup_rpath_sql() {
+static int fixup_rpath_sql(struct dso *p, char *buf, size_t buf_size) {
+	size_t n, l;
+	const char *s, *t, *origin;
+	char *d;
+	if (p->rpath || !p->rpath_orig) return 0;
+	if (!strchr(p->rpath_orig, '$')) {
+		p->rpath = p->rpath_orig;
+		return 0;
+	}
+	n = 0;
+	s = p->rpath_orig;
+	while ((t=strchr(s, '$'))) {
+		if (strncmp(t, "$ORIGIN", 7) && strncmp(t, "${ORIGIN}", 9))
+			return 0;
+		s = t+1;
+		n++;
+	}
+	if (n > SSIZE_MAX/PATH_MAX) return 0;
+
+	if (p->kernel_mapped) {
+		/* $ORIGIN searches cannot be performed for the main program
+		 * when it is suid/sgid/AT_SECURE. This is because the
+		 * pathname is under the control of the caller of execve.
+		 * For libraries, however, $ORIGIN can be processed safely
+		 * since the library's pathname came from a trusted source
+		 * (either system paths or a call to dlopen). */
+		if (libc.secure)
+			return 0;
+		l = readlink("/proc/self/exe", buf, buf_size);
+		if (l == -1) switch (errno) {
+		case ENOENT:
+		case ENOTDIR:
+		case EACCES:
+			return 0;
+		default:
+			return -1;
+		}
+		if (l >= buf_size)
+			return 0;
+		buf[l] = 0;
+		origin = buf;
+	} else {
+		origin = p->name;
+	}
+	t = strrchr(origin, '/');
+	if (t) {
+		l = t-origin;
+	} else {
+		/* Normally p->name will always be an absolute or relative
+		 * pathname containing at least one '/' character, but in the
+		 * case where ldso was invoked as a command to execute a
+		 * program in the working directory, app.name may not. Fix. */
+		origin = ".";
+		l = 1;
+	}
+	/* Disallow non-absolute origins for suid/sgid/AT_SECURE. */
+	if (libc.secure && *origin != '/')
+		return 0;
+	p->rpath = malloc(strlen(p->rpath_orig) + n*l + 1);
+	if (!p->rpath) return -1;
+
+	d = p->rpath;	
+	sqlite3_stmt *stmt;
+	char* sql = "SELECT \
+                    replace(replace(elf_strings.value, '$ORIGIN', ?), '${ORIGIN}', ?) as s_path \
+                    FROM \
+                    elf_dynamic_entries \
+                    INNER JOIN \
+                    elf_strings ON elf_dynamic_entries.value = elf_strings.offset \
+                    WHERE \
+                    elf_dynamic_entries.tag = 'RUNPATH';";
+	sqlite3* db = p->db;
+	int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+	if (rc != SQLITE_OK){
+		dprintf(2,"%s",sqlite3_errmsg(db));
+		return 0;
+	}
+	rc |= sqlite3_bind_text(stmt, 1, origin, l, SQLITE_STATIC);
+	rc |= sqlite3_bind_text(stmt, 2, origin, l, SQLITE_STATIC);
+	if (rc != SQLITE_OK){
+		dprintf(2,"%s",sqlite3_errmsg(db));
+		return 0;
+	}
+	if (sqlite3_step(stmt) == SQLITE_ROW){
+		s = (const char*)sqlite3_column_text(stmt, 0);
+	}
+	strcpy(d, s);
 	return 0;
 }
 
@@ -1141,8 +1227,7 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
 		if (env_path) fd = path_open(name, env_path, buf, sizeof buf);
 		for (p=needed_by; fd == -1 && p; p=p->needed_by) {
 			dprintf(2, "rpath original: %s\n", p->rpath_orig);
-			int rc = fixup_rpath(p, buf, sizeof buf);
-			int rc = fixup_rpath_sql(p);
+			int rc = fixup_rpath_sql(p, buf ,sizeof buf);
 			dprintf(2, "rpath fixup: %s\n", p->rpath);
 			if (rc < 0)
 				fd = -2; /* Inhibit further search. */
