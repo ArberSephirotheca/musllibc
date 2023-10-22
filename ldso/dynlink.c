@@ -918,21 +918,6 @@ static int fixup_rpath_sql(struct dso *p, char *buf, size_t buf_size) {
 	size_t n, l;
 	const char *s, *t, *origin;
 	char *d;
-	if (p->rpath || !p->rpath_orig) return 0;
-	if (!strchr(p->rpath_orig, '$')) {
-		p->rpath = p->rpath_orig;
-		return 0;
-	}
-	n = 0;
-	s = p->rpath_orig;
-	while ((t=strchr(s, '$'))) {
-		if (strncmp(t, "$ORIGIN", 7) && strncmp(t, "${ORIGIN}", 9))
-			return 0;
-		s = t+1;
-		n++;
-	}
-	if (n > SSIZE_MAX/PATH_MAX) return 0;
-
 	if (p->kernel_mapped) {
 		/* $ORIGIN searches cannot be performed for the main program
 		 * when it is suid/sgid/AT_SECURE. This is because the
